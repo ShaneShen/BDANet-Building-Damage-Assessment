@@ -97,6 +97,43 @@ class ConvBNReluNkernel(nn.Module):
         y = self.relu(self.BN(self.conv(x)))
         return y
 
+class FuseResBlock(nn.Module):
+    # according to https://arxiv.org/pdf/1808.08127.pdf concat is better
+    def __init__(self, channels, reduction=16, concat=False):
+        super(FuseResBlock, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc1 = nn.Conv2d(channels*2, channels // reduction, kernel_size=1,
+                             padding=0)
+        self.relu = nn.ReLU(inplace=True)
+        self.fc2 = nn.Conv2d(channels // reduction, channels, kernel_size=1,
+                             padding=0)
+        self.sigmoid = nn.Sigmoid()
+
+        self.spatial_se = nn.Sequential(nn.Conv2d(channels*2, 1, kernel_size=1,
+                                                  stride=1, padding=0, bias=False),
+                                        nn.Sigmoid())
+        self.concat = concat
+
+    def forward(self, x1, x2):
+        xx = torch.cat([x1,x2], 1)
+        xChannel = self.avg_pool(xx)
+        xChannel = self.fc1(xChannel)
+        xChannel = self.relu(xChannel)
+        xChannel = self.fc2(xChannel)
+        chn_se = self.sigmoid(xChannel)
+        chn_se1 = chn_se * x1 + x1
+        chn_se2 = chn_se * x2 + x2
+
+        xx = torch.cat([chn_se1, chn_se1], 1)
+        #xSpatial = torch.cat([x1, x2],1)
+        xSpatial = self.spatial_se(xx)
+        spa_se1 = x1 * xSpatial + x1
+        spa_se2 = x2 * xSpatial + x2
+
+        if self.concat:
+            return torch.cat([chn_se1, spa_se1], dim=1),  torch.cat([chn_se2, spa_se2], dim=1)
+        else:
+            return (chn_se1 + spa_se1)/2, (chn_se1 + spa_se2)/2
 
 class Attention_block(nn.Module):
     def __init__(self, F_c, F_de,  reduction=16, concat=True):
